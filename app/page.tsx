@@ -17,6 +17,8 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import Image from "next/image";
+import Link from "next/link";
 import { formatMenuDate, formatPrice, localized, todayInTashkent, type Language, type MenuItem } from "./lib/catalog";
 import { copy } from "./lib/i18n";
 import { defaultSiteSettings, localizedSiteSetting, type SiteSettings } from "./lib/site-settings";
@@ -57,7 +59,7 @@ function Logo({ compact = false }: { compact?: boolean }) {
   return (
     <div className={`flex items-center ${compact ? "gap-2" : "gap-3"}`}>
       <div className="h-11 w-11 overflow-hidden rounded-2xl border border-[#eadfd3] bg-white shadow-sm">
-        <img src="/logo.png" alt="CHEF LUNCH logo" className="h-full w-full object-cover" />
+        <Image unoptimized width={640} height={480} src="/logo.png" alt="CHEF LUNCH logo" className="h-full w-full object-cover" />
       </div>
       {!compact && (
         <div className="leading-none">
@@ -74,7 +76,8 @@ export default function Home() {
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [menuDate, setMenuDate] = useState(todayInTashkent());
   const [menuLoading, setMenuLoading] = useState(true);
-  const [siteSettings, setSiteSettings] = useState<SiteSettings>(defaultSiteSettings);
+  const [menuUnavailable, setMenuUnavailable] = useState(false);
+  const [siteSettings, setSiteSettings] = useState<SiteSettings>({ ...defaultSiteSettings, acceptingOrders: false });
   const [cart, setCart] = useState<Record<string, number>>({});
   const [cartOpen, setCartOpen] = useState(false);
   const [form, setForm] = useState<OrderForm>(emptyForm);
@@ -88,28 +91,28 @@ export default function Home() {
   const deliveryText = localizedSiteSetting(siteSettings, "deliveryText", language) || t.freeDelivery;
   const ordersClosedText = language === "uz" ? "Buyurtmalar vaqtincha yopiq" : language === "en" ? "Orders are temporarily closed" : "Заказы временно закрыты";
   const cartItems = useMemo(
-    () => menu.filter((item) => cart[String(item.id)]).map((item) => ({ ...item, count: cart[String(item.id)] })),
+    () => menu.filter((item) => item.quantity > 0 && cart[String(item.id)]).map((item) => ({ ...item, count: Math.min(99, item.quantity, cart[String(item.id)]) })),
     [cart, menu],
   );
   const cartCount = cartItems.reduce((sum, item) => sum + item.count, 0);
   const cartTotal = cartItems.reduce((sum, item) => sum + item.price * item.count, 0);
 
   useEffect(() => {
-    fetch("/api/menu")
+    fetch("/api/menu", { cache: "no-store" })
       .then((response) => (response.ok ? response.json() as Promise<{ items?: MenuItem[]; date?: string }> : Promise.reject(new Error("menu"))))
       .then((payload) => {
         setMenu(payload.items ?? []);
         if (payload.date) setMenuDate(payload.date);
       })
-      .catch(() => undefined)
+      .catch(() => setMenuUnavailable(true))
       .finally(() => setMenuLoading(false));
   }, []);
 
   useEffect(() => {
-    fetch("/api/settings")
+    fetch("/api/settings", { cache: "no-store" })
       .then((response) => (response.ok ? response.json() as Promise<SiteSettings> : Promise.reject(new Error("settings"))))
       .then((payload) => setSiteSettings(payload))
-      .catch(() => undefined);
+      .catch(() => setSiteSettings({ ...defaultSiteSettings, acceptingOrders: false }));
   }, []);
 
   useEffect(() => {
@@ -139,7 +142,7 @@ export default function Home() {
         execute: (input) => {
           const value = typeof input === "object" && input !== null ? input as { id?: string; quantity?: number } : {};
           const item = menu.find((candidate) => String(candidate.id) === value.id);
-          if (!item) return { ok: false, error: "Dish not found" };
+          if (!item || item.quantity <= 0) return { ok: false, error: "Dish unavailable" };
           const quantity = Math.max(1, Math.min(item.quantity, Math.floor(value.quantity || 1)));
           setCart((current) => ({ ...current, [String(item.id)]: Math.min(item.quantity, (current[String(item.id)] ?? 0) + quantity) }));
           return { ok: true, id: String(item.id), quantity };
@@ -153,7 +156,7 @@ export default function Home() {
   function addToCart(item: MenuItem) {
     setCart((current) => {
       const key = String(item.id);
-      const nextCount = Math.min((current[key] ?? 0) + 1, item.quantity);
+      const nextCount = Math.min(99, (current[key] ?? 0) + 1, item.quantity);
       return { ...current, [key]: nextCount };
     });
   }
@@ -161,7 +164,7 @@ export default function Home() {
   function updateCount(item: MenuItem, direction: "up" | "down") {
     const key = String(item.id);
     setCart((current) => {
-      const next = Math.max(0, Math.min(item.quantity, (current[key] ?? 0) + (direction === "up" ? 1 : -1)));
+      const next = Math.max(0, Math.min(99, item.quantity, (current[key] ?? 0) + (direction === "up" ? 1 : -1)));
       const updated = { ...current };
       if (next === 0) delete updated[key];
       else updated[key] = next;
@@ -191,7 +194,7 @@ export default function Home() {
 
   async function submitOrder(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!cartItems.length) return;
+    if (sending || !cartItems.length || !siteSettings.acceptingOrders) return;
     setSending(true);
     setError("");
     try {
@@ -203,12 +206,12 @@ export default function Home() {
           ...form,
         }),
       });
-      const payload = (await response.json()) as { error?: string; order?: { orderNumber?: string } };
+      const payload = (await response.json()) as { error?: string; order?: { orderNumber?: string }; stock?: Array<{ id: number; quantity: number }> };
       if (!response.ok) throw new Error(payload.error || "Buyurtma yuborilmadi");
-      const orderedCounts = new Map(cartItems.map((item) => [String(item.id), item.count]));
+      const remainingStock = new Map((payload.stock ?? []).map((item) => [String(item.id), item.quantity]));
       setMenu((current) => current.map((item) => ({
         ...item,
-        quantity: Math.max(0, item.quantity - (orderedCounts.get(String(item.id)) ?? 0)),
+        quantity: remainingStock.get(String(item.id)) ?? item.quantity,
       })));
       setSuccess(payload.order?.orderNumber ?? "CHEF LUNCH");
       setCart({});
@@ -309,14 +312,14 @@ export default function Home() {
           <div className="flex items-center gap-2 text-sm font-semibold text-[#6f665e]"><CalendarDays size={17} className="text-[#bd2b1f]" /> {deliveryText}</div>
         </div>
         {!siteSettings.acceptingOrders && <div className="mb-5 rounded-2xl border border-[#efc4bc] bg-[#fff0ed] px-4 py-3 text-sm font-bold text-[#a92118]">{ordersClosedText}</div>}
-        {menuLoading ? <div className="rounded-3xl border border-dashed border-[#d7c8bb] bg-white px-6 py-16 text-center"><div className="mx-auto h-8 w-8 animate-spin rounded-full border-4 border-[#eadfd3] border-t-[#bd2b1f]" /><p className="mt-4 text-sm font-bold text-[#81776d]">{language === "uz" ? "Menyu yuklanmoqda..." : language === "en" ? "Loading menu..." : "Меню загружается..."}</p></div> : menu.length === 0 ? <div className="rounded-3xl border border-dashed border-[#d7c8bb] bg-white px-6 py-16 text-center"><div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[#f5ede4] text-2xl">🍽️</div><h3 className="mt-4 text-xl font-black">{language === "uz" ? "Bugungi menyu hali kiritilmagan" : language === "en" ? "Today’s menu is not ready yet" : "Сегодняшнее меню ещё не добавлено"}</h3><p className="mt-2 text-sm leading-6 text-[#81776d]">{language === "uz" ? "Iltimos, birozdan keyin qayta tekshiring." : language === "en" ? "Please check again a little later." : "Пожалуйста, проверьте немного позже."}</p></div> : <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        {menuLoading ? <div className="rounded-3xl border border-dashed border-[#d7c8bb] bg-white px-6 py-16 text-center"><div className="mx-auto h-8 w-8 animate-spin rounded-full border-4 border-[#eadfd3] border-t-[#bd2b1f]" /><p className="mt-4 text-sm font-bold text-[#81776d]">{language === "uz" ? "Menyu yuklanmoqda..." : language === "en" ? "Loading menu..." : "Меню загружается..."}</p></div> : menuUnavailable ? <div role="alert" className="rounded-3xl border border-[#eadfd3] bg-white px-6 py-16 text-center"><h3 className="text-xl font-black">{language === "uz" ? "Menyuni yuklab bo‘lmadi" : language === "en" ? "The menu could not be loaded" : "Не удалось загрузить меню"}</h3><p className="mt-3 text-sm">{language === "uz" ? "Iltimos, birozdan keyin sahifani yangilang." : language === "en" ? "Please refresh the page in a moment." : "Пожалуйста, обновите страницу чуть позже."}</p></div> : menu.length === 0 ? <div className="rounded-3xl border border-dashed border-[#d7c8bb] bg-white px-6 py-16 text-center"><div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[#f5ede4] text-2xl">🍽️</div><h3 className="mt-4 text-xl font-black">{language === "uz" ? "Bugungi menyu hali kiritilmagan" : language === "en" ? "Today’s menu is not ready yet" : "Сегодняшнее меню ещё не добавлено"}</h3><p className="mt-2 text-sm leading-6 text-[#81776d]">{language === "uz" ? "Iltimos, birozdan keyin qayta tekshiring." : language === "en" ? "Please check again a little later." : "Пожалуйста, проверьте немного позже."}</p></div> : <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {menu.map((item) => {
             const count = cart[String(item.id)] ?? 0;
             const soldOut = item.quantity <= 0;
             return (
               <article key={String(item.id)} className="group overflow-hidden rounded-[26px] border border-[#eadfd3] bg-white shadow-[0_10px_30px_rgb(80_45_23/5%)] transition hover:-translate-y-1 hover:shadow-[0_18px_38px_rgb(80_45_23/10%)]">
                 <div className="relative h-52 overflow-hidden bg-[#f1e3d4]">
-                  {item.imageUrl ? <img src={item.imageUrl} alt={String(localized(item, language, "name"))} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" /> : <div className="flex h-full items-center justify-center bg-[radial-gradient(circle_at_50%_40%,#fff7eb_0%,#f4d8bf_68%,#eac2a4_100%)]"><span className="text-[92px] drop-shadow-[0_16px_10px_rgb(80_45_23/15%)] transition duration-500 group-hover:scale-110">{item.emoji ?? "🍱"}</span></div>}
+                  {item.imageUrl ? <Image unoptimized width={640} height={480} src={item.imageUrl} alt={String(localized(item, language, "name"))} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" /> : <div className="flex h-full items-center justify-center bg-[radial-gradient(circle_at_50%_40%,#fff7eb_0%,#f4d8bf_68%,#eac2a4_100%)]"><span className="text-[92px] drop-shadow-[0_16px_10px_rgb(80_45_23/15%)] transition duration-500 group-hover:scale-110">{item.emoji ?? "🍱"}</span></div>}
                   <div className="absolute left-4 top-4 rounded-full bg-white/90 px-3 py-1.5 text-[11px] font-black text-[#bd2b1f] shadow-sm">{formatPrice(item.price)}</div>
                   {soldOut && <div className="absolute inset-0 flex items-center justify-center bg-[#20211f]/45"><span className="rounded-full bg-white px-4 py-2 text-sm font-black text-[#20211f]">{t.soldOut}</span></div>}
                 </div>
@@ -345,7 +348,7 @@ export default function Home() {
         </div>
       </section>
 
-      <footer className="mx-auto flex max-w-7xl flex-col gap-4 px-5 py-8 text-sm text-[#81776d] sm:flex-row sm:items-center sm:justify-between sm:px-8 lg:px-10"><Logo compact /><div className="flex flex-wrap items-center gap-4"><p>© {siteSettings.brandName}. {deliveryText}.</p>{siteSettings.phone && <a href={`tel:${siteSettings.phone}`} className="font-semibold text-[#bd2b1f]">{siteSettings.phone}</a>}<a href="/admin" className="font-semibold text-[#bd2b1f] hover:underline">{t.admin} <ChevronRight size={14} className="inline" /></a></div></footer>
+      <footer className="mx-auto flex max-w-7xl flex-col gap-4 px-5 py-8 text-sm text-[#81776d] sm:flex-row sm:items-center sm:justify-between sm:px-8 lg:px-10"><Logo compact /><div className="flex flex-wrap items-center gap-4"><p>© {siteSettings.brandName}. {deliveryText}.</p>{siteSettings.phone && <a href={`tel:${siteSettings.phone}`} className="font-semibold text-[#bd2b1f]">{siteSettings.phone}</a>}<Link href="/admin" className="font-semibold text-[#bd2b1f] hover:underline">{t.admin} <ChevronRight size={14} className="inline" /></Link></div></footer>
 
       {cartOpen && <div className="fixed inset-0 z-50 bg-[#20211f]/30 backdrop-blur-sm" onClick={() => setCartOpen(false)}><aside role="dialog" aria-modal="true" aria-label={t.cart} onClick={(event) => event.stopPropagation()} className="absolute right-0 top-0 flex h-full w-full max-w-[520px] flex-col border-l border-[#eadfd3] bg-[#fffaf4] shadow-[-20px_0_60px_rgb(80_45_23/16%)]">
         <div className="flex items-center justify-between border-b border-[#eadfd3] px-5 py-5 sm:px-7"><div><p className="text-xs font-black uppercase tracking-[0.16em] text-[#bd2b1f]">CHEF LUNCH</p><h2 className="mt-1 text-2xl font-black tracking-[-0.04em]">{success ? t.orderSuccess : t.cart}</h2></div><button type="button" aria-label={t.close} onClick={() => setCartOpen(false)} className="flex h-10 w-10 items-center justify-center rounded-full border border-[#eadfd3] bg-white text-[#706b64] transition hover:text-[#bd2b1f]"><X size={18} /></button></div>

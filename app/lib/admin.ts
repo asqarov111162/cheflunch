@@ -4,19 +4,20 @@ import { getDb } from "../../db";
 import { adminSettings } from "../../db/schema";
 import type { ChatGPTUser } from "../chatgpt-auth";
 import { defaultSiteSettings, normalizeSiteSettings, type SiteSettings } from "./site-settings";
+import { AppError, errorResponse } from "./errors";
 
 const PASSWORD_KEY = "admin_password_hash";
 const SITE_SETTINGS_KEY = "site_settings";
 const TELEGRAM_SETTINGS_KEY = "telegram_settings";
 const SESSION_COOKIE_NAME = "chef_lunch_admin_session";
 const SESSION_MAX_AGE = 60 * 60 * 24 * 7;
-const FALLBACK_SESSION_SECRET = "chef-lunch-local-session-secret";
 const encoder = new TextEncoder();
 
 export type AdminSession = {
   userId: string;
   email: string;
   expiresAt: number;
+  passwordVersion: string;
 };
 
 export type TelegramConfig = {
@@ -32,7 +33,16 @@ function allowedEmails() {
 }
 
 export function adminIsConfigured() {
-  return allowedEmails().length > 0;
+  return !adminConfigurationError();
+}
+
+export function adminConfigurationError() {
+  if (!process.env.DATABASE_URL?.trim()) return "Baza ulanmagan. Vercel’da DATABASE_URL ni kiriting va yangi deploy qiling.";
+  if (!allowedEmails().length) return "Vercel sozlamalariga ADMIN_EMAILS — admin email manzilini kiriting.";
+  if (!process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_SESSION_SECRET.length < 32 || process.env.ADMIN_SESSION_SECRET.startsWith("replace-with")) {
+    return "Vercel’da ADMIN_SESSION_SECRET uchun kamida 32 belgili tasodifiy maxfiy qiymat kiriting.";
+  }
+  return null;
 }
 
 export async function getAdminUser(): Promise<ChatGPTUser | null> {
@@ -49,7 +59,7 @@ export async function getAdminUser(): Promise<ChatGPTUser | null> {
 
 export async function requireAdminIdentity() {
   if (!adminIsConfigured()) {
-    return { user: null, response: Response.json({ error: "Admin kirishi hali sozlanmagan." }, { status: 503 }) };
+    return { user: null, response: Response.json({ error: adminConfigurationError() }, { status: 503 }) };
   }
   const user = await getAdminUser();
   if (!user) return { user: null, response: Response.json({ error: "Admin email manzili sozlanmagan." }, { status: 503 }) };
@@ -59,7 +69,12 @@ export async function requireAdminIdentity() {
 export async function requireAdminApi(request?: Request) {
   const identity = await requireAdminIdentity();
   if (identity.response || !identity.user) return identity;
-  const session = await getAdminSession(request?.headers);
+  if (request && !["GET", "HEAD"].includes(request.method) && request.headers.get("origin") && request.headers.get("origin") !== new URL(request.url).origin) {
+    return { user: null, response: Response.json({ error: "Ruxsat etilmagan so‘rov." }, { status: 403 }) };
+  }
+  let session;
+  try { session = await getAdminSession(request?.headers); }
+  catch (error) { return { user: null, response: errorResponse(error) }; }
   if (!session || session.userId !== identity.user.userId || session.email.toLowerCase() !== identity.user.email.toLowerCase()) {
     return { user: null, response: Response.json({ error: "Admin paroli bilan kirish kerak." }, { status: 401 }) };
   }
@@ -67,7 +82,6 @@ export async function requireAdminApi(request?: Request) {
 }
 
 async function readSetting(key: string) {
-  try {
     const db = getDb();
     const [row] = await db
       .select({ value: adminSettings.value })
@@ -75,9 +89,6 @@ async function readSetting(key: string) {
       .where(eq(adminSettings.key, key))
       .limit(1);
     return row?.value ?? null;
-  } catch {
-    return null;
-  }
 }
 
 async function writeSetting(key: string, value: string) {
@@ -91,17 +102,27 @@ async function writeSetting(key: string, value: string) {
     });
 }
 
-async function removeSetting(key: string) {
-  const db = getDb();
-  await db.delete(adminSettings).where(eq(adminSettings.key, key));
-}
-
 export async function getAdminPasswordHash() {
   return readSetting(PASSWORD_KEY);
 }
 
-export async function saveAdminPassword(password: string) {
-  await writeSetting(PASSWORD_KEY, await hashPassword(password));
+export async function saveAdminPassword(password: string, onlyIfMissing = false) {
+  const value = await hashPassword(password);
+  if (onlyIfMissing) {
+    const inserted = await getDb().insert(adminSettings).values({ key: PASSWORD_KEY, value })
+      .onConflictDoNothing().returning({ key: adminSettings.key });
+    if (!inserted.length) throw new AppError("Admin paroli allaqachon yaratilgan.", 409);
+  } else {
+    await writeSetting(PASSWORD_KEY, value);
+  }
+}
+
+export async function verifySetupKey(value: unknown) {
+  const expected = process.env.ADMIN_SETUP_KEY;
+  if (!expected || expected.length < 32) throw new AppError("Birinchi parol uchun Vercel’da ADMIN_SETUP_KEY sozlang (kamida 32 belgi).", 503);
+  if (typeof value !== "string" || value.length > 256) return false;
+  const digest = async (text: string) => new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(text)));
+  return constantTimeEquals(await digest(value), await digest(expected));
 }
 
 function encodeBase64Url(bytes: Uint8Array) {
@@ -125,8 +146,10 @@ async function derivePasswordDigest(password: string, salt: Uint8Array) {
 
 export async function hashPassword(password: string) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const derived = await derivePasswordDigest(password, salt);
-  return `sha256$${encodeBase64Url(salt)}$${encodeBase64Url(derived)}`;
+  const iterations = 600_000;
+  const key = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
+  const derived = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations, hash: "SHA-256" }, key, 256));
+  return `pbkdf2$${iterations}$${encodeBase64Url(salt)}$${encodeBase64Url(derived)}`;
 }
 
 function constantTimeEquals(left: Uint8Array, right: Uint8Array) {
@@ -148,7 +171,7 @@ export async function verifyPassword(password: string, stored: string) {
   }
   if (parts.length !== 4 || parts[0] !== "pbkdf2") return false;
   const iterations = Number(parts[1]);
-  if (!Number.isInteger(iterations) || iterations < 50_000 || iterations > 500_000) return false;
+  if (!Number.isInteger(iterations) || iterations < 50_000 || iterations > 1_000_000) return false;
   try {
     const key = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
     const derived = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", salt: decodeBase64Url(parts[2]) as unknown as BufferSource, iterations, hash: "SHA-256" }, key, 256));
@@ -159,7 +182,13 @@ export async function verifyPassword(password: string, stored: string) {
 }
 
 function sessionSecret() {
-  return process.env.ADMIN_SESSION_SECRET || FALLBACK_SESSION_SECRET;
+  const secret = process.env.ADMIN_SESSION_SECRET;
+  if (!secret || secret.length < 32 || secret.startsWith("replace-with")) throw new AppError("ADMIN_SESSION_SECRET sozlanmagan yoki juda qisqa.", 503, "ADMIN_NOT_CONFIGURED");
+  return secret;
+}
+
+async function passwordVersion(passwordHash: string) {
+  return encodeBase64Url(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(passwordHash))));
 }
 
 async function signSession(payload: string) {
@@ -168,10 +197,13 @@ async function signSession(payload: string) {
 }
 
 export async function createAdminSession(user: ChatGPTUser) {
+  const passwordHash = await getAdminPasswordHash();
+  if (!passwordHash) throw new AppError("Admin paroli hali yaratilmagan.", 401);
   const payload = encodeBase64Url(encoder.encode(JSON.stringify({
     userId: user.userId,
     email: user.email.toLowerCase(),
     expiresAt: Date.now() + SESSION_MAX_AGE * 1000,
+    passwordVersion: await passwordVersion(passwordHash),
   })));
   return `${payload}.${await signSession(payload)}`;
 }
@@ -193,18 +225,21 @@ export async function getAdminSession(source?: { get(name: string): string | nul
   const requestHeaders = source ?? await headers();
   const value = readCookie(requestHeaders.get("cookie"), SESSION_COOKIE_NAME);
   if (!value) return null;
-  const [payload, signature] = value.split(".");
-  if (!payload || !signature) return null;
+  const [payload, signature, extra] = value.split(".");
+  if (!payload || !signature || extra !== undefined) return null;
+  let parsed: AdminSession;
   try {
     const expected = decodeBase64Url(await signSession(payload));
     const actual = decodeBase64Url(signature);
     if (!constantTimeEquals(actual, expected)) return null;
-    const parsed = JSON.parse(new TextDecoder().decode(decodeBase64Url(payload))) as AdminSession;
-    if (!parsed.userId || !parsed.email || !parsed.expiresAt || parsed.expiresAt < Date.now()) return null;
-    return parsed;
+    parsed = JSON.parse(new TextDecoder().decode(decodeBase64Url(payload))) as AdminSession;
+    if (typeof parsed.userId !== "string" || typeof parsed.email !== "string" || !Number.isFinite(parsed.expiresAt) || parsed.expiresAt <= Date.now() || typeof parsed.passwordVersion !== "string") return null;
   } catch {
     return null;
   }
+  const stored = await getAdminPasswordHash();
+  if (!stored || parsed.passwordVersion !== await passwordVersion(stored)) return null;
+  return parsed;
 }
 
 export async function getSiteSettings(): Promise<SiteSettings> {
@@ -213,7 +248,7 @@ export async function getSiteSettings(): Promise<SiteSettings> {
   try {
     return normalizeSiteSettings(JSON.parse(raw));
   } catch {
-    return defaultSiteSettings;
+    throw new AppError("Sayt sozlamalari buzilgan. Admin orqali qayta saqlang.", 503, "SITE_SETTINGS_INVALID");
   }
 }
 
@@ -262,24 +297,22 @@ export async function getTelegramConfig(): Promise<TelegramConfig> {
 }
 
 export async function saveTelegramConfig(config: TelegramConfig) {
-  if (!config.botToken || !config.chatId) {
-    await removeSetting(TELEGRAM_SETTINGS_KEY);
-    return;
-  }
+  // Store an explicit empty configuration on disconnect; do not reactivate env credentials.
   await writeSetting(TELEGRAM_SETTINGS_KEY, await encryptSecret(JSON.stringify(config)));
 }
 
 export async function sendTelegramMessage(text: string) {
-  const config = await getTelegramConfig();
-  if (!config.botToken || !config.chatId) return { ok: false, error: "Telegram bot hali ulanmagan." };
   try {
+    const config = await getTelegramConfig();
+    if (!config.botToken || !config.chatId) return { ok: false, error: "Telegram bot hali ulanmagan." };
     const response = await fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
       method: "POST",
+      signal: AbortSignal.timeout(8_000),
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ chat_id: config.chatId, text, disable_web_page_preview: true }),
     });
     const payload = await response.json().catch(() => null) as { ok?: boolean; description?: string } | null;
-    if (!response.ok || payload?.ok === false) return { ok: false, error: payload?.description || "Telegram xabar yuborilmadi." };
+    if (!response.ok || payload?.ok !== true) return { ok: false, error: "Telegram xabar yuborilmadi. Bot tokeni, Chat ID va botga /start yuborilganini tekshiring." };
     return { ok: true, error: null };
   } catch {
     return { ok: false, error: "Telegram serveriga ulanib bo‘lmadi." };

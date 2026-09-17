@@ -1,6 +1,7 @@
 import { LockKeyhole, ShieldAlert } from "lucide-react";
 import Link from "next/link";
-import { adminIsConfigured, getAdminPasswordHash, getAdminSession, getAdminUser } from "../lib/admin";
+import { adminConfigurationError, getAdminPasswordHash, getAdminSession, getAdminUser } from "../lib/admin";
+import { publicError } from "../lib/errors";
 import AdminGate from "./AdminGate";
 import AdminPanel from "./AdminPanel";
 
@@ -11,16 +12,26 @@ function AdminMessage({ title, text, action }: { title: string; text: string; ac
 }
 
 export default async function AdminPage() {
-  if (!adminIsConfigured()) {
-    return <AdminMessage title="Admin kirishi sozlanmagan" text="Vercel sozlamalarida ADMIN_EMAILS qiymatini kiriting. Masalan: sizning email manzilingiz." action={<Link href="/" className="inline-flex items-center gap-2 rounded-full bg-[#bd2b1f] px-5 py-3 text-sm font-bold text-white">Bosh sahifaga qaytish</Link>} />;
+  const configurationError = adminConfigurationError();
+  if (configurationError) {
+    return <AdminMessage title="Sayt sozlamalari kerak" text={configurationError} action={<Link href="/" className="inline-flex items-center gap-2 rounded-full bg-[#bd2b1f] px-5 py-3 text-sm font-bold text-white">Bosh sahifaga qaytish</Link>} />;
   }
   const admin = await getAdminUser();
   if (!admin) {
     return <AdminMessage title="Ruxsat yo‘q" text="Admin email manzili topilmadi. Vercel sozlamalaridagi ADMIN_EMAILS qiymatini tekshiring." action={<Link href="/" className="inline-flex items-center gap-2 rounded-full border border-[#eadfd3] bg-white px-5 py-3 text-sm font-bold text-[#20211f]"><LockKeyhole size={17} /> Bosh sahifaga qaytish</Link>} />;
   }
-  const passwordHash = await getAdminPasswordHash();
-  const session = await getAdminSession();
-  if (!passwordHash) return <AdminGate mode="setup" email={admin.email} />;
-  if (!session || session.userId !== admin.userId) return <AdminGate mode="login" email={admin.email} />;
+  let passwordHash;
+  let session;
+  try {
+    passwordHash = await getAdminPasswordHash();
+    if (passwordHash) session = await getAdminSession();
+  } catch (error) {
+    return <AdminMessage title="Admin panel vaqtincha ochilmayapti" text={publicError(error, "Bazaga ulanib bo‘lmadi. Neon va DATABASE_URL sozlamasini tekshiring.").error} />;
+  }
+  if (!passwordHash && (!process.env.ADMIN_SETUP_KEY || process.env.ADMIN_SETUP_KEY.length < 32)) {
+    return <AdminMessage title="Adminni xavfsiz sozlash" text="Vercel’da ADMIN_SETUP_KEY uchun kamida 32 belgili tasodifiy maxfiy kalit kiriting va qayta deploy qiling. Bu kalit faqat birinchi parol yaratishda kerak." />;
+  }
+  if (!passwordHash) return <AdminGate mode="setup" />;
+  if (!session || session.userId !== admin.userId) return <AdminGate mode="login" />;
   return <AdminPanel email={admin.email} />;
 }
