@@ -1,5 +1,5 @@
-import { LockKeyhole, LogIn, ShieldAlert } from "lucide-react";
-import { chatGPTSignInPath, chatGPTSignOutPath, getChatGPTUser } from "../chatgpt-auth";
+import { LockKeyhole, ShieldAlert } from "lucide-react";
+import Link from "next/link";
 import { adminIsConfigured, getAdminPasswordHash, getAdminSession, getAdminUser } from "../lib/admin";
 import AdminGate from "./AdminGate";
 import AdminPanel from "./AdminPanel";
@@ -11,16 +11,12 @@ function AdminMessage({ title, text, action }: { title: string; text: string; ac
 }
 
 export default async function AdminPage() {
-  const user = await getChatGPTUser();
-  if (!user) {
-    return <AdminMessage title="Admin paneliga kirish" text="Buyurtmalar va menyuni boshqarish uchun ChatGPT hisobingiz bilan kiring." action={<a href={chatGPTSignInPath("/admin")} target="_top" className="inline-flex items-center gap-2 rounded-full bg-[#20211f] px-5 py-3 text-sm font-bold text-white"><LogIn size={17} /> Kirish</a>} />;
-  }
   if (!adminIsConfigured()) {
-    return <AdminMessage title="Admin kirishi sozlanmagan" text="Sayt egasining email manzilini ADMIN_EMAILS sozlamasiga qo‘shish kerak. Shundan keyin admin paneli faqat ruxsat berilgan email uchun ochiladi." action={<a href="/" className="inline-flex items-center gap-2 rounded-full bg-[#bd2b1f] px-5 py-3 text-sm font-bold text-white">Bosh sahifaga qaytish</a>} />;
+    return <AdminMessage title="Admin kirishi sozlanmagan" text="Vercel sozlamalarida ADMIN_EMAILS qiymatini kiriting. Masalan: sizning email manzilingiz." action={<Link href="/" className="inline-flex items-center gap-2 rounded-full bg-[#bd2b1f] px-5 py-3 text-sm font-bold text-white">Bosh sahifaga qaytish</Link>} />;
   }
   const admin = await getAdminUser();
   if (!admin) {
-    return <AdminMessage title="Ruxsat yo‘q" text={`${user.email} adminlar ro‘yxatida yo‘q. Boshqa hisob bilan kiring yoki sayt egasidan ruxsat so‘rang.`} action={<a href={chatGPTSignOutPath("/admin")} target="_top" className="inline-flex items-center gap-2 rounded-full border border-[#eadfd3] bg-white px-5 py-3 text-sm font-bold text-[#20211f]"><LockKeyhole size={17} /> Boshqa hisob bilan kirish</a>} />;
+    return <AdminMessage title="Ruxsat yo‘q" text="Admin email manzili topilmadi. Vercel sozlamalaridagi ADMIN_EMAILS qiymatini tekshiring." action={<Link href="/" className="inline-flex items-center gap-2 rounded-full border border-[#eadfd3] bg-white px-5 py-3 text-sm font-bold text-[#20211f]"><LockKeyhole size={17} /> Bosh sahifaga qaytish</Link>} />;
   }
   const passwordHash = await getAdminPasswordHash();
   const session = await getAdminSession();

@@ -1,8 +1,8 @@
 import { sql } from "drizzle-orm";
-import { integer, real, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
+import { integer, pgTable, real, serial, text, unique } from "drizzle-orm/pg-core";
 
-export const dishes = sqliteTable("dishes", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const dishes = pgTable("dishes", {
+  id: serial("id").primaryKey(),
   nameUz: text("name_uz").notNull(),
   nameEn: text("name_en").notNull().default(""),
   nameRu: text("name_ru").notNull().default(""),
@@ -14,21 +14,21 @@ export const dishes = sqliteTable("dishes", {
   imageUrl: text("image_url").notNull().default(""),
   emoji: text("emoji").notNull().default("🍱"),
   isActive: integer("is_active").notNull().default(1),
-  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP::text`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP::text`),
 });
 
-export const dailyMenus = sqliteTable("daily_menus", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const dailyMenus = pgTable("daily_menus", {
+  id: serial("id").primaryKey(),
   menuDate: text("menu_date").notNull().unique(),
   isPublished: integer("is_published").notNull().default(1),
-  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP::text`),
 });
 
-export const dailyMenuItems = sqliteTable(
+export const dailyMenuItems = pgTable(
   "daily_menu_items",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
+    id: serial("id").primaryKey(),
     menuId: integer("menu_id").notNull(),
     dishId: integer("dish_id").notNull(),
     sortOrder: integer("sort_order").notNull().default(0),
@@ -41,8 +41,8 @@ export const dailyMenuItems = sqliteTable(
   }),
 );
 
-export const orders = sqliteTable("orders", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const orders = pgTable("orders", {
+  id: serial("id").primaryKey(),
   orderNumber: text("order_number").notNull().unique(),
   customerName: text("customer_name").notNull(),
   phone: text("phone").notNull(),
@@ -53,11 +53,11 @@ export const orders = sqliteTable("orders", {
   note: text("note").notNull().default(""),
   total: integer("total").notNull(),
   status: text("status").notNull().default("new"),
-  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP::text`),
 });
 
-export const orderItems = sqliteTable("order_items", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const orderItems = pgTable("order_items", {
+  id: serial("id").primaryKey(),
   orderId: integer("order_id").notNull(),
   dishId: integer("dish_id"),
   dishName: text("dish_name").notNull(),
@@ -66,8 +66,8 @@ export const orderItems = sqliteTable("order_items", {
   subtotal: integer("subtotal").notNull(),
 });
 
-export const adminSettings = sqliteTable("admin_settings", {
+export const adminSettings = pgTable("admin_settings", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
-  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP::text`),
 });

@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { put } from "@vercel/blob";
 import { requireAdminApi } from "../../../lib/admin";
 
 const allowedTypes = new Map([
@@ -10,7 +10,9 @@ const allowedTypes = new Map([
 export async function POST(request: Request) {
   const access = await requireAdminApi(request);
   if (access.response) return access.response;
-  if (!env.BUCKET) return Response.json({ error: "Rasm saqlash xizmati hali sozlanmagan." }, { status: 503 });
+  if (!process.env.BLOB_STORE_ID && !process.env.BLOB_READ_WRITE_TOKEN) {
+    return Response.json({ error: "Vercel Blob storage hali ulanmagan." }, { status: 503 });
+  }
   try {
     const form = await request.formData();
     const file = form.get("file");
@@ -19,10 +21,12 @@ export async function POST(request: Request) {
     if (!extension) return Response.json({ error: "Faqat JPG, PNG yoki WEBP rasm yuklash mumkin." }, { status: 400 });
     if (file.size > 5 * 1024 * 1024) return Response.json({ error: "Rasm hajmi 5 MB dan oshmasin." }, { status: 400 });
     const key = `dishes/${crypto.randomUUID()}.${extension}`;
-    await env.BUCKET.put(key, await file.arrayBuffer(), {
-      httpMetadata: { contentType: file.type, cacheControl: "public, max-age=31536000, immutable" },
+    const blob = await put(key, file, {
+      access: "public",
+      contentType: file.type,
+      cacheControlMaxAge: 31536000,
     });
-    return Response.json({ success: true, key, url: `/api/uploads/${key}` }, { status: 201 });
+    return Response.json({ success: true, key, url: blob.url }, { status: 201 });
   } catch {
     return Response.json({ error: "Rasmni saqlab bo‘lmadi." }, { status: 500 });
   }

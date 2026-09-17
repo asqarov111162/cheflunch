@@ -1,9 +1,8 @@
-import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { headers } from "next/headers";
 import { getDb } from "../../db";
 import { adminSettings } from "../../db/schema";
-import { getChatGPTUser, type ChatGPTUser } from "../chatgpt-auth";
+import type { ChatGPTUser } from "../chatgpt-auth";
 import { defaultSiteSettings, normalizeSiteSettings, type SiteSettings } from "./site-settings";
 
 const PASSWORD_KEY = "admin_password_hash";
@@ -11,7 +10,6 @@ const SITE_SETTINGS_KEY = "site_settings";
 const TELEGRAM_SETTINGS_KEY = "telegram_settings";
 const SESSION_COOKIE_NAME = "chef_lunch_admin_session";
 const SESSION_MAX_AGE = 60 * 60 * 24 * 7;
-const PASSWORD_ITERATIONS = 120_000;
 const FALLBACK_SESSION_SECRET = "chef-lunch-local-session-secret";
 const encoder = new TextEncoder();
 
@@ -27,7 +25,7 @@ export type TelegramConfig = {
 };
 
 function allowedEmails() {
-  return (env.ADMIN_EMAILS ?? "")
+  return (process.env.ADMIN_EMAILS ?? "")
     .split(",")
     .map((email) => email.trim().toLowerCase())
     .filter(Boolean);
@@ -38,24 +36,23 @@ export function adminIsConfigured() {
 }
 
 export async function getAdminUser(): Promise<ChatGPTUser | null> {
-  const user = await getChatGPTUser();
-  if (!user) return null;
   const emails = allowedEmails();
-  if (!emails.length || !emails.includes(user.email.toLowerCase())) return null;
-  return user;
+  const email = emails[0];
+  if (!email) return null;
+  return {
+    userId: `admin:${email}`,
+    displayName: email,
+    email,
+    fullName: null,
+  };
 }
 
 export async function requireAdminIdentity() {
   if (!adminIsConfigured()) {
     return { user: null, response: Response.json({ error: "Admin kirishi hali sozlanmagan." }, { status: 503 }) };
   }
-  const user = await getChatGPTUser();
-  if (!user) {
-    return { user: null, response: Response.json({ error: "ChatGPT hisobiga kirish kerak." }, { status: 401 }) };
-  }
-  if (!allowedEmails().includes(user.email.toLowerCase())) {
-    return { user: null, response: Response.json({ error: "Admin huquqi kerak." }, { status: 403 }) };
-  }
+  const user = await getAdminUser();
+  if (!user) return { user: null, response: Response.json({ error: "Admin email manzili sozlanmagan." }, { status: 503 }) };
   return { user, response: null };
 }
 
@@ -162,7 +159,7 @@ export async function verifyPassword(password: string, stored: string) {
 }
 
 function sessionSecret() {
-  return env.ADMIN_SESSION_SECRET || FALLBACK_SESSION_SECRET;
+  return process.env.ADMIN_SESSION_SECRET || FALLBACK_SESSION_SECRET;
 }
 
 async function signSession(payload: string) {
@@ -261,7 +258,7 @@ export async function getTelegramConfig(): Promise<TelegramConfig> {
       }
     }
   }
-  return { botToken: env.TELEGRAM_BOT_TOKEN ?? "", chatId: env.TELEGRAM_CHAT_ID ?? "" };
+  return { botToken: process.env.TELEGRAM_BOT_TOKEN ?? "", chatId: process.env.TELEGRAM_CHAT_ID ?? "" };
 }
 
 export async function saveTelegramConfig(config: TelegramConfig) {
