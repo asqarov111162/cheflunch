@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { after, before, beforeEach, test } from "node:test";
+import { createRequire } from "node:module";
+import { after, before, beforeEach, test, type TestContext } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { eq } from "drizzle-orm";
@@ -29,6 +30,37 @@ const globals = globalThis as typeof globalThis & { chefLunchDb?: ChefLunchDatab
 const envKeys = ["DATABASE_URL", "ADMIN_EMAILS", "ADMIN_SESSION_SECRET", "ADMIN_SETUP_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "BLOB_READ_WRITE_TOKEN", "BLOB_STORE_ID"];
 const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
 const testSetupKey = "test-only-setup-key-01234567890123456789";
+// Intercept the Blob SDK's own HTTP transport. Never contact a real Blob store.
+const sdkRequire = createRequire(createRequire(import.meta.url).resolve("@vercel/blob"));
+const { MockAgent, getGlobalDispatcher, setGlobalDispatcher } = sdkRequire("undici") as typeof import("undici");
+
+function mockBlob(t: TestContext) {
+  const previousDispatcher = getGlobalDispatcher();
+  const previousToken = process.env.BLOB_READ_WRITE_TOKEN;
+  const agent = new MockAgent();
+  agent.disableNetConnect();
+  setGlobalDispatcher(agent);
+  process.env.BLOB_READ_WRITE_TOKEN = "vercel_blob_rw_teststore_test_only_never_sent";
+  t.after(async () => {
+    setGlobalDispatcher(previousDispatcher);
+    if (previousToken === undefined) delete process.env.BLOB_READ_WRITE_TOKEN;
+    else process.env.BLOB_READ_WRITE_TOKEN = previousToken;
+    await agent.close();
+  });
+  return agent;
+}
+
+function imageUploadRequest(cookie: string, dishId?: number | string) {
+  const form = new FormData();
+  const png = Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZlAAAAABJRU5ErkJggg==", "base64"));
+  form.set("file", new File([png], "lunch.png", { type: "image/png" }));
+  if (dishId !== undefined) form.set("dishId", String(dishId));
+  return new Request("http://localhost/api/admin/uploads", { method: "POST", headers: { cookie, origin: "http://localhost" }, body: form });
+}
+
+function blobReply(url: string) {
+  return { url, downloadUrl: url, pathname: new URL(url).pathname.slice(1), contentType: "image/png", contentDisposition: 'inline; filename="lunch.png"' };
+}
 
 before(async () => {
   process.env.DATABASE_URL = "postgresql://test:test@localhost/test";
@@ -311,4 +343,75 @@ test("uploads report missing storage and reject empty or oversized files before 
       assert.equal((await upload(makeUpload(file))).status, 400);
     }
   } finally { delete process.env.BLOB_READ_WRITE_TOKEN; }
+});
+
+test("uploading an existing dish photo immediately persists it to the public menu without resetting stock", async (t) => {
+  const cookie = await adminCookie();
+  const dish = await seedDish(5);
+  const agent = mockBlob(t);
+  const url = "https://teststore.public.blob.vercel-storage.com/dishes/lunch.png";
+  agent.get("https://vercel.com").intercept({ method: "PUT", path: /^\/api\/blob\/\?pathname=dishes%2F/ })
+    .reply(200, blobReply(url), { headers: { "content-type": "application/json" } });
+  await createOrder(orderInput(dish.id, 2));
+  const response = await upload(imageUploadRequest(cookie, dish.id));
+  assert.equal(response.status, 201, JSON.stringify(await response.clone().json()));
+  const result = await response.json();
+  assert.equal(result.saved, true);
+  assert.equal(result.dishId, dish.id);
+  assert.equal(result.url, url);
+  const [saved] = await db.select().from(schema.dishes).where(eq(schema.dishes.id, dish.id));
+  assert.equal(saved.imageUrl, url);
+  assert.equal(saved.quantity, 3);
+  assert.equal(saved.price, dish.price);
+  assert.equal(saved.nameUz, dish.nameUz);
+  const items = (await (await menu(request("/api/menu"))).json()).items;
+  assert.equal(items[0].imageUrl, url);
+  const catalogItems = (await (await catalog.GET(request("/api/admin/catalog", "GET", undefined, cookie))).json()).dishes;
+  assert.equal(catalogItems[0].imageUrl, url);
+  agent.assertNoPendingInterceptors();
+});
+
+test("a new dish retains its uploaded photo after create and later catalog edits", async (t) => {
+  const cookie = await adminCookie();
+  const agent = mockBlob(t);
+  const url = "https://teststore.public.blob.vercel-storage.com/dishes/new-lunch.png";
+  agent.get("https://vercel.com").intercept({ method: "PUT", path: /^\/api\/blob\/\?pathname=dishes%2F/ })
+    .reply(200, blobReply(url), { headers: { "content-type": "application/json" } });
+  const response = await upload(imageUploadRequest(cookie));
+  assert.equal(response.status, 201, JSON.stringify(await response.clone().json()));
+  const photo = await response.json();
+  assert.equal(photo.saved, false);
+  assert.equal((await db.select().from(schema.dishes)).length, 0);
+  const created = await catalog.POST(request("/api/admin/catalog", "POST", { nameUz: "Borsh", price: 45_000, quantity: 10, imageUrl: photo.url }, cookie));
+  assert.equal(created.status, 201);
+  const { dish } = await created.json();
+  assert.equal((await catalog.PATCH(request("/api/admin/catalog", "PATCH", { ...dish, nameUz: "Yangi borsh" }, cookie))).status, 200);
+  assert.equal((await (await menu(request("/api/menu"))).json()).items[0].imageUrl, url);
+  agent.assertNoPendingInterceptors();
+});
+
+test("image upload requires admin access and validates dish IDs before writing to Blob", async (t) => {
+  const cookie = await adminCookie();
+  const agent = mockBlob(t);
+  assert.equal((await upload(imageUploadRequest("", 1))).status, 401);
+  for (const id of ["", "abc", "1.5", "0", "-1"]) {
+    assert.equal((await upload(imageUploadRequest(cookie, id))).status, 400);
+  }
+  assert.equal((await upload(imageUploadRequest(cookie, 999))).status, 404);
+  agent.assertNoPendingInterceptors();
+});
+
+test("failed photo replacement preserves the previous public image", async (t) => {
+  const cookie = await adminCookie();
+  const dish = await seedDish();
+  const previousUrl = "https://teststore.public.blob.vercel-storage.com/dishes/previous.png";
+  await db.update(schema.dishes).set({ imageUrl: previousUrl }).where(eq(schema.dishes.id, dish.id));
+  const agent = mockBlob(t);
+  agent.get("https://vercel.com").intercept({ method: "PUT", path: /^\/api\/blob\/\?pathname=dishes%2F/ })
+    .reply(403, { error: { code: "forbidden", message: "test secret must never reach client" } }, { headers: { "content-type": "application/json" } });
+  const response = await upload(imageUploadRequest(cookie, dish.id));
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).code, "IMAGE_STORAGE_UNAVAILABLE");
+  assert.equal((await (await menu(request("/api/menu"))).json()).items[0].imageUrl, previousUrl);
+  agent.assertNoPendingInterceptors();
 });

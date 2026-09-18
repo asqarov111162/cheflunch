@@ -98,14 +98,39 @@ export default function Home() {
   const cartTotal = cartItems.reduce((sum, item) => sum + item.price * item.count, 0);
 
   useEffect(() => {
-    fetch("/api/menu", { cache: "no-store" })
-      .then((response) => (response.ok ? response.json() as Promise<{ items?: MenuItem[]; date?: string }> : Promise.reject(new Error("menu"))))
-      .then((payload) => {
+    let active = true;
+    let controller: AbortController;
+    const loadMenu = async () => {
+      controller?.abort();
+      const current = new AbortController();
+      controller = current;
+      try {
+        const response = await fetch("/api/menu", { cache: "no-store", signal: current.signal });
+        if (!response.ok) throw new Error("menu");
+        const payload = await response.json() as { items?: MenuItem[]; date?: string };
+        if (!active || current.signal.aborted) return;
         setMenu(payload.items ?? []);
+        setMenuUnavailable(false);
         if (payload.date) setMenuDate(payload.date);
-      })
-      .catch(() => setMenuUnavailable(true))
-      .finally(() => setMenuLoading(false));
+      } catch {
+        if (active && !current.signal.aborted) setMenuUnavailable(true);
+      } finally {
+        if (active && !current.signal.aborted) setMenuLoading(false);
+      }
+    };
+    const refreshMenu = () => { if (document.visibilityState === "visible") void loadMenu(); };
+    void loadMenu();
+    // Refresh photos and availability after returning from the admin panel/tab.
+    window.addEventListener("focus", refreshMenu);
+    window.addEventListener("pageshow", refreshMenu);
+    document.addEventListener("visibilitychange", refreshMenu);
+    return () => {
+      active = false;
+      controller?.abort();
+      window.removeEventListener("focus", refreshMenu);
+      window.removeEventListener("pageshow", refreshMenu);
+      document.removeEventListener("visibilitychange", refreshMenu);
+    };
   }, []);
 
   useEffect(() => {

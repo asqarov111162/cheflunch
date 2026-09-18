@@ -1,5 +1,9 @@
 import { put } from "@vercel/blob";
+import { eq } from "drizzle-orm";
+import { getDb } from "../../../../db";
+import { dishes } from "../../../../db/schema";
 import { requireAdminApi } from "../../../lib/admin";
+import { AppError, errorResponse } from "../../../lib/errors";
 
 const allowedTypes = new Map([
   ["image/jpeg", "jpg"],
@@ -11,10 +15,19 @@ export async function POST(request: Request) {
   const access = await requireAdminApi(request);
   if (access.response) return access.response;
   if (!process.env.BLOB_STORE_ID && !process.env.BLOB_READ_WRITE_TOKEN) {
-    return Response.json({ error: "Vercel Blob storage hali ulanmagan." }, { status: 503 });
+    return errorResponse(new AppError("Rasm saqlash uchun Vercel Blob public omborini loyihaga ulang va qayta deploy qiling.", 503, "IMAGE_STORAGE_NOT_CONFIGURED"));
   }
   try {
     const form = await request.formData();
+    const target = form.get("dishId");
+    const dishId = target === null ? null : Number(target);
+    if (target !== null && (typeof target !== "string" || !/^\d+$/.test(target) || !Number.isSafeInteger(dishId) || dishId === null || dishId <= 0)) {
+      throw new AppError("Taom raqami noto‘g‘ri.");
+    }
+    if (dishId !== null) {
+      const [dish] = await getDb().select({ id: dishes.id }).from(dishes).where(eq(dishes.id, dishId));
+      if (!dish) throw new AppError("Taom topilmadi. Katalogni yangilang.", 404);
+    }
     const file = form.get("file");
     if (!(file instanceof File)) return Response.json({ error: "Rasm tanlanmagan." }, { status: 400 });
     const extension = allowedTypes.get(file.type);
@@ -30,9 +43,19 @@ export async function POST(request: Request) {
       access: "public",
       contentType: file.type,
       cacheControlMaxAge: 31536000,
+      abortSignal: AbortSignal.timeout(20_000),
+    }).catch(() => {
+      throw new AppError("Rasm yuklanmadi. Vercel Blob ulanishi va omborning Public sozlamasini tekshiring.", 503, "IMAGE_STORAGE_UNAVAILABLE");
     });
-    return Response.json({ success: true, key, url: blob.url }, { status: 201 });
-  } catch {
-    return Response.json({ error: "Rasmni saqlab bo‘lmadi." }, { status: 500 });
+    if (dishId !== null) {
+      // Persist only the image: never overwrite stock or other unsaved edits.
+      const [updated] = await getDb().update(dishes)
+        .set({ imageUrl: blob.url, updatedAt: new Date().toISOString() })
+        .where(eq(dishes.id, dishId)).returning({ id: dishes.id });
+      if (!updated) throw new AppError("Taom topilmadi. Katalogni yangilang.", 404);
+    }
+    return Response.json({ success: true, key, url: blob.url, dishId, saved: dishId !== null }, { status: 201, headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    return errorResponse(error, "Rasmni taomga saqlab bo‘lmadi. Qayta urinib ko‘ring.");
   }
 }

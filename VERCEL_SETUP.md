@@ -54,7 +54,7 @@ Keyingi kirishlarda faqat admin paroli kerak. Sozlamalar → Admin parolini alma
 
 Vercel Blob store yarating, **public** access tanlang va shu loyihaga ulang. Integratsiya bergan credentiallar kerak: `BLOB_STORE_ID` va Vercel OIDC, yoki `BLOB_READ_WRITE_TOKEN`. Tokenni browser kodi yoki `NEXT_PUBLIC_*` nomi bilan saqlamang.
 
-JPG, PNG, WEBP, maksimal 4 MB. Yuklangan rasmni tanlagach taomni saqlang. Katalogdan taomni o‘chirish eski Blob rasmini avtomatik o‘chirmaydi.
+JPG, PNG, WEBP, maksimal 4 MB. Mavjud taomning “Rasm almashtirish” tugmasi orqali yuklangan rasm avtomatik bazaga saqlanadi; narx yoki sonni qayta yozmaydi. Yangi taomda rasm yuklanishi tugagach “Taom qo‘shish”ni bosing. Yuklash xatosi forma yonida ko‘rinadi va rasm yuklanmaguncha yangi taomni qo‘shib bo‘lmaydi. Eski versiyada saqlanmay qolgan rasmlarni qayta tanlang. Katalogdan taomni o‘chirish eski Blob rasmini avtomatik o‘chirmaydi.
 
 ## 5. Telegram
 
